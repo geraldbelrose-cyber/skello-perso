@@ -333,21 +333,22 @@ with tabs[0]:
         st.caption("Tu peux modifier les cellules puis cliquer sur **Enregistrer**.")
 
     df = shifts_df(date_from, date_to)
-    edited = st.data_editor(
-        df,
-        use_container_width=True,
-        num_rows="dynamic",
-        column_config={
-            "id": st.column_config.NumberColumn("id", disabled=True),
-            "shift_date": st.column_config.DateColumn("Date"),
-            "employee_id": st.column_config.NumberColumn("Employé (ID)"),
-            "employee": st.column_config.TextColumn("Nom", disabled=True),
-            "start_time": st.column_config.TextColumn("Début (HH:MM)"),
-            "end_time": st.column_config.TextColumn("Fin (HH:MM)"),
-            "break_minutes": st.column_config.NumberColumn("Pause (min)"),
-            "replacement": st.column_config.CheckboxColumn("Remplacement"),
-            "replaces_employee_id": st.column_config.NumberColumn("Remplace qui (ID)"),
-            "comment": st.column_config.TextColumn("Commentaire"),
+# --- SAFE TYPES pour éviter les bugs DateColumn/TimeColumn ---
+df_display = df.copy()
+
+for c in ["shift_date", "start_time", "end_time"]:
+    if c in df_display.columns:
+        df_display[c] = df_display[c].astype(str)
+
+for c in ["break_minutes", "employee_id", "replaces_employee_id"]:
+    if c in df_display.columns:
+        df_display[c] = pd.to_numeric(df_display[c], errors="coerce")
+
+edited = st.data_editor(
+    df_display,
+    use_container_width=True,
+    num_rows="dynamic",
+)
         },
         
     )
