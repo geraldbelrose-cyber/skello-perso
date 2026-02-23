@@ -1,32 +1,56 @@
-
 import streamlit as st
 import sqlite3
 import pandas as pd
 from datetime import datetime, date, time, timedelta
 
-st.set_page_config(page_title="Mini-Skello (3 employés)", layout="wide")
+st.set_page_config(page_title="Mini-Skello", layout="wide")
 
 DB_PATH = "data.db"
+
 
 def get_conn():
     return sqlite3.connect(DB_PATH, check_same_thread=False)
 
+
 def init_db():
     conn = get_conn()
     cur = conn.cursor()
+
+    # --- employees table (new schema: first_name/last_name) ---
     cur.execute("""
     CREATE TABLE IF NOT EXISTS employees (
         id INTEGER PRIMARY KEY,
-        name TEXT NOT NULL,
+        first_name TEXT NOT NULL,
+        last_name TEXT NOT NULL DEFAULT '',
         active INTEGER NOT NULL DEFAULT 1
     );
     """)
+
+    # --- MIGRATION: if old schema existed, try to add columns + copy name -> first_name ---
+    cols = [r[1] for r in cur.execute("PRAGMA table_info(employees);").fetchall()]
+    # If someone previously had "name" column (old app), it may still exist in some cases.
+    # SQLite cannot DROP COLUMN easily; we just ensure new columns exist, then copy.
+    if "first_name" not in cols:
+        cur.execute("ALTER TABLE employees ADD COLUMN first_name TEXT;")
+    if "last_name" not in cols:
+        cur.execute("ALTER TABLE employees ADD COLUMN last_name TEXT DEFAULT '';")
+
+    cols = [r[1] for r in cur.execute("PRAGMA table_info(employees);").fetchall()]
+    if "name" in cols:
+        # copy old name into first_name where first_name is empty
+        cur.execute("""
+            UPDATE employees
+            SET first_name = COALESCE(first_name, name)
+            WHERE first_name IS NULL OR TRIM(first_name) = '';
+        """)
+
     cur.execute("""
     CREATE TABLE IF NOT EXISTS settings (
         key TEXT PRIMARY KEY,
         value TEXT NOT NULL
     );
     """)
+
     cur.execute("""
     CREATE TABLE IF NOT EXISTS shifts (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -41,6 +65,7 @@ def init_db():
         FOREIGN KEY(employee_id) REFERENCES employees(id)
     );
     """)
+
     cur.execute("""
     CREATE TABLE IF NOT EXISTS absences (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -53,6 +78,7 @@ def init_db():
         FOREIGN KEY(employee_id) REFERENCES employees(id)
     );
     """)
+
     cur.execute("""
     CREATE TABLE IF NOT EXISTS lateness (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -65,12 +91,16 @@ def init_db():
         FOREIGN KEY(employee_id) REFERENCES employees(id)
     );
     """)
+
     conn.commit()
 
+    # Seed employees if empty
     cur.execute("SELECT COUNT(*) FROM employees;")
     if cur.fetchone()[0] == 0:
-        cur.executemany("INSERT INTO employees(id,name,active) VALUES (?,?,1);",
-                        [(1,"Employé A"), (2,"Employé B"), (3,"Employé C")])
+        cur.executemany(
+            "INSERT INTO employees(id, first_name, last_name, active) VALUES (?,?,?,1);",
+            [(1, "Employé", "A", ""), (2, "Employé", "B", ""), (3, "Employé", "C", "")]
+        )
         conn.commit()
 
     defaults = {
@@ -91,13 +121,16 @@ def init_db():
     if cur.fetchone()[0] == 0:
         cur.executemany("INSERT INTO settings(key,value) VALUES (?,?);", list(defaults.items()))
         conn.commit()
+
     conn.close()
+
 
 def get_settings():
     conn = get_conn()
     df = pd.read_sql_query("SELECT key, value FROM settings;", conn)
     conn.close()
     return dict(zip(df["key"], df["value"]))
+
 
 def set_setting(key, value):
     conn = get_conn()
@@ -110,32 +143,39 @@ def set_setting(key, value):
     conn.commit()
     conn.close()
 
+
 def employees_df(active_only=True):
     conn = get_conn()
-    q = "SELECT id, name, active FROM employees"
+    q = "SELECT id, first_name, last_name, active FROM employees"
     if active_only:
         q += " WHERE active=1"
     q += " ORDER BY id;"
     df = pd.read_sql_query(q, conn)
     conn.close()
+    df["name"] = (df["first_name"].fillna("") + " " + df["last_name"].fillna("")).str.strip()
     return df
 
-DAYS = ["MONDAY","TUESDAY","WEDNESDAY","THURSDAY","FRIDAY","SATURDAY","SUNDAY"]
+
+DAYS = ["MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY", "FRIDAY", "SATURDAY", "SUNDAY"]
 DAY_LABELS_FR = {
-    "MONDAY":"Lundi","TUESDAY":"Mardi","WEDNESDAY":"Mercredi","THURSDAY":"Jeudi",
-    "FRIDAY":"Vendredi","SATURDAY":"Samedi","SUNDAY":"Dimanche"
+    "MONDAY": "Lundi", "TUESDAY": "Mardi", "WEDNESDAY": "Mercredi", "THURSDAY": "Jeudi",
+    "FRIDAY": "Vendredi", "SATURDAY": "Samedi", "SUNDAY": "Dimanche"
 }
+
 
 def parse_hhmm(s: str) -> time:
     return datetime.strptime(s, "%H:%M").time()
 
+
 def combine(d: date, t: time) -> datetime:
     return datetime(d.year, d.month, d.day, t.hour, t.minute)
+
 
 def minutes_between(d: date, start: str, end: str) -> int:
     s = combine(d, parse_hhmm(start))
     e = combine(d, parse_hhmm(end))
     return int((e - s).total_seconds() // 60)
+
 
 def nth_saturday_of_month(d: date) -> int:
     if d.weekday() != 5:
@@ -145,16 +185,19 @@ def nth_saturday_of_month(d: date) -> int:
     first_sat = first + timedelta(days=offset)
     return 1 + (d - first_sat).days // 7
 
+
 def daterange(d1: date, d2: date):
     cur = d1
     while cur <= d2:
         yield cur
         cur += timedelta(days=1)
 
+
 def shifts_df(date_from: date, date_to: date):
     conn = get_conn()
     q = """
-    SELECT s.id, s.shift_date, s.employee_id, e.name as employee,
+    SELECT s.id, s.shift_date, s.employee_id,
+           (e.first_name || ' ' || e.last_name) as employee,
            s.start_time, s.end_time, s.break_minutes,
            s.replacement, s.replaces_employee_id, s.comment
     FROM shifts s
@@ -166,12 +209,14 @@ def shifts_df(date_from: date, date_to: date):
     conn.close()
     return df
 
+
 def save_shifts(df: pd.DataFrame):
     conn = get_conn()
     cur = conn.cursor()
     ids = [int(x) for x in df["id"].dropna().tolist()] if "id" in df.columns else []
     if ids:
-        cur.execute(f"DELETE FROM shifts WHERE id IN ({','.join(['?']*len(ids))});", ids)
+        cur.execute(f"DELETE FROM shifts WHERE id IN ({','.join(['?'] * len(ids))});", ids)
+
     for _, r in df.iterrows():
         if pd.isna(r.get("shift_date")) or pd.isna(r.get("employee_id")):
             continue
@@ -183,18 +228,20 @@ def save_shifts(df: pd.DataFrame):
             int(r["employee_id"]),
             str(r["start_time"])[:5],
             str(r["end_time"])[:5],
-            int(r["break_minutes"]),
-            int(r["replacement"]),
-            None if pd.isna(r.get("replaces_employee_id")) or r.get("replaces_employee_id")=="" else int(r["replaces_employee_id"]),
+            int(r["break_minutes"]) if not pd.isna(r.get("break_minutes")) else 0,
+            int(r["replacement"]) if not pd.isna(r.get("replacement")) else 0,
+            None if pd.isna(r.get("replaces_employee_id")) or str(r.get("replaces_employee_id")).strip() == "" else int(r["replaces_employee_id"]),
             None if pd.isna(r.get("comment")) else str(r.get("comment")),
         ))
     conn.commit()
     conn.close()
 
+
 def absences_df(date_from: date, date_to: date):
     conn = get_conn()
     q = """
-    SELECT a.id, a.start_date, a.end_date, a.employee_id, e.name as employee,
+    SELECT a.id, a.start_date, a.end_date, a.employee_id,
+           (e.first_name || ' ' || e.last_name) as employee,
            a.type, a.justified, a.comment
     FROM absences a
     JOIN employees e ON e.id = a.employee_id
@@ -205,12 +252,14 @@ def absences_df(date_from: date, date_to: date):
     conn.close()
     return df
 
+
 def save_absences(df: pd.DataFrame):
     conn = get_conn()
     cur = conn.cursor()
     ids = [int(x) for x in df["id"].dropna().tolist()] if "id" in df.columns else []
     if ids:
-        cur.execute(f"DELETE FROM absences WHERE id IN ({','.join(['?']*len(ids))});", ids)
+        cur.execute(f"DELETE FROM absences WHERE id IN ({','.join(['?'] * len(ids))});", ids)
+
     for _, r in df.iterrows():
         if pd.isna(r.get("start_date")) or pd.isna(r.get("end_date")) or pd.isna(r.get("employee_id")):
             continue
@@ -222,16 +271,18 @@ def save_absences(df: pd.DataFrame):
             str(r["end_date"])[:10],
             int(r["employee_id"]),
             str(r["type"]),
-            int(r["justified"]),
+            int(r["justified"]) if not pd.isna(r.get("justified")) else 0,
             None if pd.isna(r.get("comment")) else str(r.get("comment")),
         ))
     conn.commit()
     conn.close()
 
+
 def lateness_df(date_from: date, date_to: date):
     conn = get_conn()
     q = """
-    SELECT l.id, l.late_date, l.employee_id, e.name as employee,
+    SELECT l.id, l.late_date, l.employee_id,
+           (e.first_name || ' ' || e.last_name) as employee,
            l.scheduled_time, l.arrival_time, l.justified, l.comment
     FROM lateness l
     JOIN employees e ON e.id = l.employee_id
@@ -242,12 +293,14 @@ def lateness_df(date_from: date, date_to: date):
     conn.close()
     return df
 
+
 def save_lateness(df: pd.DataFrame):
     conn = get_conn()
     cur = conn.cursor()
     ids = [int(x) for x in df["id"].dropna().tolist()] if "id" in df.columns else []
     if ids:
-        cur.execute(f"DELETE FROM lateness WHERE id IN ({','.join(['?']*len(ids))});", ids)
+        cur.execute(f"DELETE FROM lateness WHERE id IN ({','.join(['?'] * len(ids))});", ids)
+
     for _, r in df.iterrows():
         if pd.isna(r.get("late_date")) or pd.isna(r.get("employee_id")):
             continue
@@ -259,11 +312,12 @@ def save_lateness(df: pd.DataFrame):
             int(r["employee_id"]),
             str(r["scheduled_time"])[:5],
             str(r["arrival_time"])[:5],
-            int(r["justified"]),
+            int(r["justified"]) if not pd.isna(r.get("justified")) else 0,
             None if pd.isna(r.get("comment")) else str(r.get("comment")),
         ))
     conn.commit()
     conn.close()
+
 
 def generate_week(week_start: date):
     s = get_settings()
@@ -308,14 +362,17 @@ def generate_week(week_start: date):
     conn.commit()
     conn.close()
 
+
+# ---- APP ----
 init_db()
-st.title("Mini‑Skello (3 employés) — Planning, absences, retards, heures")
+st.title("Mini-Skello — Planning, absences, retards, heures")
 
-tabs = st.tabs(["Planning", "Absences", "Retards", "Rapports", "Paramètres"])
+tabs = st.tabs(["Planning", "Absences", "Retards", "Rapports", "Paramètres", "Employés"])
 
+# ================== TAB 0: PLANNING ==================
 with tabs[0]:
     st.subheader("Planning")
-    colA, colB, colC = st.columns([1,1,2])
+    colA, colB, colC = st.columns([1, 1, 2])
     with colA:
         week_start = st.date_input("Semaine (lundi)", value=date.today() - timedelta(days=date.today().weekday()))
         if week_start.weekday() != 0:
@@ -333,30 +390,34 @@ with tabs[0]:
         st.caption("Tu peux modifier les cellules puis cliquer sur **Enregistrer**.")
 
     df = shifts_df(date_from, date_to)
-# --- SAFE TYPES pour éviter les bugs DateColumn/TimeColumn ---
-df_display = df.copy()
 
-for c in ["shift_date", "start_time", "end_time"]:
-    if c in df_display.columns:
-        df_display[c] = df_display[c].astype(str)
+    # IMPORTANT: keep types stable (SQLite gives TEXT). Avoid DateColumn crash.
+    df_display = df.copy()
+    for c in ["shift_date", "start_time", "end_time"]:
+        if c in df_display.columns:
+            df_display[c] = df_display[c].astype(str)
+    for c in ["break_minutes", "employee_id", "replaces_employee_id", "replacement"]:
+        if c in df_display.columns:
+            df_display[c] = pd.to_numeric(df_display[c], errors="coerce")
 
-for c in ["break_minutes", "employee_id", "replaces_employee_id"]:
-    if c in df_display.columns:
-        df_display[c] = pd.to_numeric(df_display[c], errors="coerce")
-
-edited = st.data_editor(
-    df_display,
-    use_container_width=True,
-    num_rows="dynamic",
-)
-        },
-        
+    edited = st.data_editor(
+        df_display,
+        use_container_width=True,
+        num_rows="dynamic",
+        disabled=["employee"],  # employee name is computed from join
     )
+
     if st.button("Enregistrer (Planning)"):
-        save_cols = ["id","shift_date","employee_id","start_time","end_time","break_minutes","replacement","replaces_employee_id","comment"]
+        save_cols = ["id", "shift_date", "employee_id", "start_time", "end_time", "break_minutes",
+                     "replacement", "replaces_employee_id", "comment"]
+        # ensure these exist
+        for c in save_cols:
+            if c not in edited.columns:
+                edited[c] = None
         save_shifts(edited[save_cols].copy())
         st.success("Planning enregistré.")
 
+# ================== TAB 1: ABSENCES ==================
 with tabs[1]:
     st.subheader("Absences & congés")
     col1, col2 = st.columns(2)
@@ -366,27 +427,27 @@ with tabs[1]:
         a_to = st.date_input("jusqu'à", value=date.today() + timedelta(days=30), key="a_to")
 
     df = absences_df(a_from, a_to)
+    df_display = df.copy()
+    for c in ["start_date", "end_date"]:
+        if c in df_display.columns:
+            df_display[c] = df_display[c].astype(str)
+
     edited = st.data_editor(
-        df,
+        df_display,
         use_container_width=True,
         num_rows="dynamic",
-        column_config={
-            "id": st.column_config.NumberColumn("id", disabled=True),
-            "start_date": st.column_config.DateColumn("Début"),
-            "end_date": st.column_config.DateColumn("Fin"),
-            "employee_id": st.column_config.NumberColumn("Employé (ID)"),
-            "employee": st.column_config.TextColumn("Nom", disabled=True),
-            "type": st.column_config.SelectboxColumn("Type", options=["Congé", "Maladie", "Sans solde", "Autre"]),
-            "justified": st.column_config.CheckboxColumn("Justifié"),
-            "comment": st.column_config.TextColumn("Commentaire"),
-        },
-        disabled=["employee"]
+        disabled=["employee"],
     )
+
     if st.button("Enregistrer (Absences)"):
-        save_cols = ["id","start_date","end_date","employee_id","type","justified","comment"]
+        save_cols = ["id", "start_date", "end_date", "employee_id", "type", "justified", "comment"]
+        for c in save_cols:
+            if c not in edited.columns:
+                edited[c] = None
         save_absences(edited[save_cols].copy())
         st.success("Absences enregistrées.")
 
+# ================== TAB 2: RETARDS ==================
 with tabs[2]:
     st.subheader("Retards")
     col1, col2 = st.columns(2)
@@ -396,30 +457,40 @@ with tabs[2]:
         l_to = st.date_input("jusqu'à", value=date.today() + timedelta(days=30), key="l_to")
 
     df = lateness_df(l_from, l_to)
+    df_display = df.copy()
+    for c in ["late_date", "scheduled_time", "arrival_time"]:
+        if c in df_display.columns:
+            df_display[c] = df_display[c].astype(str)
 
     def compute_late(row):
         try:
-            sched = datetime.strptime(row["scheduled_time"], "%H:%M")
-            arr = datetime.strptime(row["arrival_time"], "%H:%M")
-            return max(0, int((arr - sched).total_seconds()//60))
+            sched = datetime.strptime(str(row["scheduled_time"])[:5], "%H:%M")
+            arr = datetime.strptime(str(row["arrival_time"])[:5], "%H:%M")
+            return max(0, int((arr - sched).total_seconds() // 60))
         except:
             return None
 
-    if not df.empty:
-        df["retard_min"] = df.apply(compute_late, axis=1)
+    if not df_display.empty:
+        df_display["retard_min"] = df_display.apply(compute_late, axis=1)
     else:
-        df["retard_min"] = pd.Series(dtype="int")
+        df_display["retard_min"] = pd.Series(dtype="int")
 
     edited = st.data_editor(
-        df,
+        df_display,
         use_container_width=True,
         num_rows="dynamic",
+        disabled=["employee"],
     )
+
     if st.button("Enregistrer (Retards)"):
-        save_cols = ["id","late_date","employee_id","scheduled_time","arrival_time","justified","comment"]
+        save_cols = ["id", "late_date", "employee_id", "scheduled_time", "arrival_time", "justified", "comment"]
+        for c in save_cols:
+            if c not in edited.columns:
+                edited[c] = None
         save_lateness(edited[save_cols].copy())
         st.success("Retards enregistrés.")
 
+# ================== TAB 3: RAPPORTS ==================
 with tabs[3]:
     st.subheader("Rapports")
     st.caption("Somme des heures prévues (planning) + absences + retards sur une période.")
@@ -432,12 +503,11 @@ with tabs[3]:
     sh = shifts_df(r_from, r_to)
     ab = absences_df(r_from, r_to)
     la = lateness_df(r_from, r_to)
-
     emps = employees_df(active_only=True)
 
     def shift_minutes(row):
-        d = datetime.strptime(row["shift_date"], "%Y-%m-%d").date()
-        mins = minutes_between(d, row["start_time"], row["end_time"])
+        d = datetime.strptime(str(row["shift_date"])[:10], "%Y-%m-%d").date()
+        mins = minutes_between(d, str(row["start_time"])[:5], str(row["end_time"])[:5])
         return max(0, mins - int(row["break_minutes"]))
 
     if not sh.empty:
@@ -448,13 +518,13 @@ with tabs[3]:
         planned = pd.DataFrame({"employee_id": [], "planned_min": []})
 
     abs_min = {int(eid): 0 for eid in emps["id"].tolist()}
-    if not ab.empty:
+    if not ab.empty and not sh.empty:
         for _, r in ab.iterrows():
             eid = int(r["employee_id"])
-            sd = datetime.strptime(r["start_date"], "%Y-%m-%d").date()
-            ed = datetime.strptime(r["end_date"], "%Y-%m-%d").date()
+            sd = datetime.strptime(str(r["start_date"])[:10], "%Y-%m-%d").date()
+            ed = datetime.strptime(str(r["end_date"])[:10], "%Y-%m-%d").date()
             for d in daterange(sd, ed):
-                day_shift = sh[(sh["employee_id"]==eid) & (sh["shift_date"]==d.isoformat())]
+                day_shift = sh[(sh["employee_id"] == eid) & (sh["shift_date"] == d.isoformat())]
                 if not day_shift.empty:
                     for __, sr in day_shift.iterrows():
                         abs_min[eid] += shift_minutes(sr)
@@ -464,26 +534,28 @@ with tabs[3]:
         for _, r in la.iterrows():
             eid = int(r["employee_id"])
             try:
-                sched = datetime.strptime(r["scheduled_time"], "%H:%M")
-                arr = datetime.strptime(r["arrival_time"], "%H:%M")
-                late_min[eid] += max(0, int((arr - sched).total_seconds()//60))
+                sched = datetime.strptime(str(r["scheduled_time"])[:5], "%H:%M")
+                arr = datetime.strptime(str(r["arrival_time"])[:5], "%H:%M")
+                late_min[eid] += max(0, int((arr - sched).total_seconds() // 60))
             except:
                 pass
 
-    rep = emps[["id","name"]].rename(columns={"id":"employee_id"})
+    rep = emps[["id", "name"]].rename(columns={"id": "employee_id"})
     rep = rep.merge(planned, on="employee_id", how="left")
     rep["planned_min"] = rep["planned_min"].fillna(0)
     rep["absence_min"] = rep["employee_id"].map(abs_min).fillna(0)
     rep["late_min"] = rep["employee_id"].map(late_min).fillna(0)
-    rep["heures_prévues"] = (rep["planned_min"]/60).round(2)
-    rep["absences_h"] = (rep["absence_min"]/60).round(2)
-    rep["retards_h"] = (rep["late_min"]/60).round(2)
-    rep["heures_restantes"] = (rep["planned_min"]/60 - rep["absence_min"]/60 - rep["late_min"]/60).round(2)
+    rep["heures_prévues"] = (rep["planned_min"] / 60).round(2)
+    rep["absences_h"] = (rep["absence_min"] / 60).round(2)
+    rep["retards_h"] = (rep["late_min"] / 60).round(2)
+    rep["heures_restantes"] = (rep["planned_min"] / 60 - rep["absence_min"] / 60 - rep["late_min"] / 60).round(2)
 
-    st.dataframe(rep[["employee_id","name","heures_prévues","absences_h","retards_h","heures_restantes"]], use_container_width=True)
+    st.dataframe(rep[["employee_id", "name", "heures_prévues", "absences_h", "retards_h", "heures_restantes"]],
+                 use_container_width=True)
     csv = rep.to_csv(index=False).encode("utf-8")
     st.download_button("Télécharger le rapport (CSV)", data=csv, file_name="rapport_heures.csv", mime="text/csv")
 
+# ================== TAB 4: PARAMÈTRES ==================
 with tabs[4]:
     st.subheader("Paramètres (horaires & repos modifiables)")
     s = get_settings()
@@ -512,14 +584,15 @@ with tabs[4]:
             rest_val = st.selectbox(
                 "Jour de repos hebdo",
                 options=DAYS,
-                index=DAYS.index(rest_default),
+                index=DAYS.index(rest_default) if rest_default in DAYS else 6,
                 key=f"rest_{eid}",
                 format_func=lambda x: DAY_LABELS_FR.get(x, x),
             )
         sat_key = f"sat_off_emp_{eid}"
         sat_default = int(s.get(sat_key, "3"))
         with col2:
-            sat_val = st.selectbox("Samedi off du mois", options=[1,2,3,4,5], index=[1,2,3,4,5].index(sat_default), key=f"sat_{eid}")
+            sat_val = st.selectbox("Samedi off du mois", options=[1, 2, 3, 4, 5],
+                                   index=[1, 2, 3, 4, 5].index(sat_default), key=f"sat_{eid}")
         st.divider()
 
     if st.button("Enregistrer les paramètres"):
@@ -534,3 +607,48 @@ with tabs[4]:
             set_setting(f"rest_emp_{eid}", st.session_state.get(f"rest_{eid}"))
             set_setting(f"sat_off_emp_{eid}", st.session_state.get(f"sat_{eid}"))
         st.success("Paramètres enregistrés. Retourne sur Planning pour (re)générer une semaine.")
+
+# ================== TAB 5: EMPLOYÉS ==================
+with tabs[5]:
+    st.subheader("Employés")
+    st.caption("Ici tu peux ajouter/modifier les prénoms/nom et activer/désactiver un employé.")
+
+    conn = get_conn()
+    df_emp = pd.read_sql_query("SELECT id, first_name, last_name, active FROM employees ORDER BY id;", conn)
+    conn.close()
+
+    df_emp_display = df_emp.copy()
+    df_emp_display["id"] = pd.to_numeric(df_emp_display["id"], errors="coerce")
+    df_emp_display["active"] = pd.to_numeric(df_emp_display["active"], errors="coerce").fillna(1).astype(int)
+
+    edited_emp = st.data_editor(df_emp_display, use_container_width=True, num_rows="dynamic")
+
+    if st.button("Enregistrer (Employés)"):
+        # Replace content safely:
+        conn = get_conn()
+        cur = conn.cursor()
+
+        # Keep only rows with id and first_name
+        cleaned = edited_emp.copy()
+        cleaned = cleaned[~cleaned["id"].isna()]
+        cleaned["id"] = cleaned["id"].astype(int)
+
+        # Validate unique ids
+        if cleaned["id"].duplicated().any():
+            conn.close()
+            st.error("Tu as des ID en double. Corrige-les (chaque employé doit avoir un ID unique).")
+        else:
+            cur.execute("DELETE FROM employees;")
+            for _, r in cleaned.iterrows():
+                first = str(r.get("first_name") or "").strip()
+                last = str(r.get("last_name") or "").strip()
+                if first == "":
+                    continue
+                active = int(r.get("active") or 1)
+                cur.execute(
+                    "INSERT INTO employees(id, first_name, last_name, active) VALUES (?,?,?,?);",
+                    (int(r["id"]), first, last, active)
+                )
+            conn.commit()
+            conn.close()
+            st.success("Employés enregistrés. Reviens sur Planning pour voir les noms.")
