@@ -39,9 +39,7 @@ def init_db():
     if "name" in cols:
         # copy old name into first_name where first_name is empty
         cur.execute("""
-            UPDATE employees
-            SET first_name = COALESCE(first_name, name)
-            WHERE first_name IS NULL OR TRIM(first_name) = '';
+        = '';
         """)
 
     cur.execute("""
