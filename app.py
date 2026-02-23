@@ -413,18 +413,6 @@ with tabs[2]:
         df,
         use_container_width=True,
         num_rows="dynamic",
-        column_config={
-            "id": st.column_config.NumberColumn("id", disabled=True),
-            "late_date": st.column_config.DateColumn("Date"),
-            "employee_id": st.column_config.NumberColumn("Employé (ID)"),
-            "employee": st.column_config.TextColumn("Nom", disabled=True),
-            "scheduled_time": st.column_config.TextColumn("Heure prévue (HH:MM)"),
-            "arrival_time": st.column_config.TextColumn("Heure arrivée (HH:MM)"),
-            "retard_min": st.column_config.NumberColumn("Retard (min)", disabled=True),
-            "justified": st.column_config.CheckboxColumn("Justifié"),
-            "comment": st.column_config.TextColumn("Commentaire"),
-        },
-        disabled=["employee","retard_min"]
     )
     if st.button("Enregistrer (Retards)"):
         save_cols = ["id","late_date","employee_id","scheduled_time","arrival_time","justified","comment"]
