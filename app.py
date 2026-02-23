@@ -19,7 +19,7 @@ def init_db():
     conn = get_conn()
     cur = conn.cursor()
 
-    # employees: on ajoute first_name / last_name
+    # --- tables (création si absentes) ---
     cur.execute("""
     CREATE TABLE IF NOT EXISTS employees (
         id INTEGER PRIMARY KEY,
@@ -78,7 +78,6 @@ def init_db():
     );
     """)
 
-    # Heures supplémentaires
     cur.execute("""
     CREATE TABLE IF NOT EXISTS overtime (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -92,19 +91,30 @@ def init_db():
 
     conn.commit()
 
-    # Migration légère: si name existait avant, on remplit first/last si vide
+    # --- MIGRATION: si ta DB est ancienne, employees n'a pas les colonnes ---
     cols = [r[1] for r in cur.execute("PRAGMA table_info(employees);").fetchall()]
-    if "first_name" in cols and "last_name" in cols:
-        # Remplit first_name à partir de name si first_name est vide
-        cur.execute("""
+
+    if "first_name" not in cols:
+        cur.execute("ALTER TABLE employees ADD COLUMN first_name TEXT;")
+    if "last_name" not in cols:
+        cur.execute("ALTER TABLE employees ADD COLUMN last_name TEXT;")
+    if "name" not in cols:
+        cur.execute("ALTER TABLE employees ADD COLUMN name TEXT;")
+    if "active" not in cols:
+        cur.execute("ALTER TABLE employees ADD COLUMN active INTEGER NOT NULL DEFAULT 1;")
+
+    conn.commit()
+
+    # Remplir first_name depuis name si first_name est vide
+    cur.execute("""
         UPDATE employees
         SET first_name = COALESCE(first_name, TRIM(name)),
             last_name  = COALESCE(last_name, '')
         WHERE (first_name IS NULL OR TRIM(first_name) = '')
-        """)
-        conn.commit()
+    """)
+    conn.commit()
 
-    # Seed si vide
+    # Seed si aucune ligne
     cur.execute("SELECT COUNT(*) FROM employees;")
     if cur.fetchone()[0] == 0:
         cur.executemany(
@@ -113,6 +123,7 @@ def init_db():
         )
         conn.commit()
 
+    # Settings par défaut si table vide
     defaults = {
         "weekday_start": "07:30",
         "weekday_end": "17:00",
@@ -120,22 +131,20 @@ def init_db():
         "sat_start": "07:30",
         "sat_end": "12:30",
         "sat_break": "0",
-        # repos hebdo (par ID)
-        "rest_emp_1": "TUESDAY",     # Williams ne travaille pas mardi
-        "rest_emp_2": "THURSDAY",    # Marc-André ne travaille pas jeudi
-        "rest_emp_3": "WEDNESDAY",   # Gaël ne travaille pas mercredi
-        # samedi off (n-ième samedi du mois)
-        "sat_off_emp_1": "3",  # Williams 3e samedi
-        "sat_off_emp_2": "2",  # Marc-André 2e samedi
-        "sat_off_emp_3": "4",  # Gaël 4e samedi
+        "rest_emp_1": "TUESDAY",
+        "rest_emp_2": "THURSDAY",
+        "rest_emp_3": "WEDNESDAY",
+        "sat_off_emp_1": "3",
+        "sat_off_emp_2": "2",
+        "sat_off_emp_3": "4",
     }
+
     cur.execute("SELECT COUNT(*) FROM settings;")
     if cur.fetchone()[0] == 0:
         cur.executemany("INSERT INTO settings(key,value) VALUES (?,?);", list(defaults.items()))
         conn.commit()
 
     conn.close()
-
 def get_settings():
     conn = get_conn()
     df = pd.read_sql_query("SELECT key, value FROM settings;", conn)
