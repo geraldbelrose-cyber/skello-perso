@@ -349,7 +349,7 @@ with tabs[0]:
             "replaces_employee_id": st.column_config.NumberColumn("Remplace qui (ID)"),
             "comment": st.column_config.TextColumn("Commentaire"),
         },
-        disabled=["employee_id"]
+        
     )
     if st.button("Enregistrer (Planning)"):
         save_cols = ["id","shift_date","employee_id","start_time","end_time","break_minutes","replacement","replaces_employee_id","comment"]
